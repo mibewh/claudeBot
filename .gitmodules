@@ -1,0 +1,3 @@
+[submodule "libs/pokeSandbox"]
+	path = libs/pokeSandbox
+	url = https://github.com/nbely/pokesandbox.git
