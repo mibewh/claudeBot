@@ -11,8 +11,8 @@
     "declaration": true,
     "resolveJsonModule": true,
     "paths": {
-      "@flowcord": ["./libs/pokeSandbox/libs/flowcord/src/index.ts"],
-      "@flowcord/*": ["./libs/pokeSandbox/libs/flowcord/src/*"]
+      "#flowcord": ["./libs/pokeSandbox/libs/flowcord/src/index.ts"],
+      "#flowcord/*": ["./libs/pokeSandbox/libs/flowcord/src/*"]
     }
   },
   "include": ["src/**/*"],

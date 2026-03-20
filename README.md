@@ -1,4 +1,4 @@
-# botProto
+# claudeBot
 
 A Discord bot that gives Claude a conversational presence in Discord with interactive UI. Claude chats naturally with users and dynamically constructs interactive menus — buttons, dropdowns, modals — when it needs structured input.
 

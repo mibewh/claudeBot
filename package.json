@@ -1,5 +1,5 @@
 {
-  "name": "bot-proto",
+  "name": "claude-bot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,6 +13,10 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "discord.js": "^14.18.0",
     "dotenv": "^16.4.7"
+  },
+  "imports": {
+    "#flowcord": "./libs/pokeSandbox/libs/flowcord/src/index.ts",
+    "#flowcord/*": "./libs/pokeSandbox/libs/flowcord/src/*"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

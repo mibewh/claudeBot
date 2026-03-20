@@ -12,7 +12,8 @@ import {
   type MessageComponentInteraction,
   type ModalSubmitInteraction,
 } from 'discord.js';
-import { ComponentIdManager } from '@flowcord';
+import ComponentIdManagerModule from '../../libs/pokeSandbox/libs/flowcord/src/components/ComponentIdManager.js';
+const { ComponentIdManager } = ComponentIdManagerModule as typeof import('../../libs/pokeSandbox/libs/flowcord/src/components/ComponentIdManager.js');
 
 interface ChoiceOption {
   label: string;
