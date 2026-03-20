@@ -1,0 +1,32 @@
+Notes for Nick — FlowCord findings from claudeBot testing
+=========================================================
+
+See flowcord-gaps.md for the full analysis with code examples.
+
+Quick summary of findings:
+
+1. ESM packaging issue — FlowCord's package.json has no "type": "module" field.
+   tsx (and Node ESM in general) treats its .ts files as CommonJS, so named
+   imports like `import { ComponentIdManager } from '@flowcord'` fail at runtime.
+   Consumers outside an Nx build pipeline have to use default-import workarounds.
+   The library should either add `"type": "module"` to its package.json or provide
+   a proper ESM build output.
+
+2. FlowCord-native chatbot architecture is MORE viable than expected —
+   setMessageHandler() in mixed mode supports async API calls, channel.send(),
+   and sub-menu navigation. Two small fixes would unblock it fully:
+   - awaitMessageReply() unconditionally deletes user messages (L565-568).
+     Chatbots need those visible. Add a deleteUserMessages option.
+   - After message collection, MenuRenderer uses followUp() which creates a NEW
+     message every turn, spamming the channel. Should edit _activeMessage in place.
+
+3. MenuRenderer serialization is private — we had to build a ComponentSerializer
+   class on the bot side (src/bridge/flowcord-adapter.ts) to convert FlowCord
+   configs to Discord.js builders outside a MenuSession. This should be a public
+   FlowCord utility. Our implementation mirrors the exact API we're proposing —
+   it's tested and works well.
+
+4. What works great: ComponentIdManager (perfect for standalone use), declarative
+   component helpers (button/actionRow/select), ComponentValidator, mixed mode's
+   racing collector design, and the openSubMenu/complete/onComplete continuation
+   pattern (powerful enough for sequential tool chaining and recursive AI calls).

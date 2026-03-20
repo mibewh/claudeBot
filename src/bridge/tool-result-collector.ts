@@ -1,19 +1,29 @@
 import {
   ActionRowBuilder,
-  ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
   StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  type TextBasedChannel,
+  type SendableChannels,
+  type Message,
   ComponentType,
   type MessageComponentInteraction,
+  type MessageActionRowComponentBuilder,
+  type ButtonInteraction,
+  type StringSelectMenuInteraction,
   type ModalSubmitInteraction,
 } from 'discord.js';
-import ComponentIdManagerModule from '../../libs/pokeSandbox/libs/flowcord/src/components/ComponentIdManager.js';
-const { ComponentIdManager } = ComponentIdManagerModule as typeof import('../../libs/pokeSandbox/libs/flowcord/src/components/ComponentIdManager.js');
+import {
+  button,
+  actionRow,
+  select,
+  ComponentIdManager,
+  validateEmbeds,
+} from '#flowcord';
+import type { ButtonConfig, ActionRowConfig } from '#flowcord';
+import { ComponentSerializer, buttonsToActionRows } from './flowcord-adapter.js';
 
 interface ChoiceOption {
   label: string;
@@ -34,81 +44,74 @@ interface FormField {
   style?: 'short' | 'paragraph';
 }
 
+/** Result from sendAndCollect — the interaction plus the sent message for cleanup. */
+interface CollectResult {
+  interaction: MessageComponentInteraction;
+  message: Message;
+}
+
 const COLLECT_TIMEOUT = 120_000; // 2 minutes
+const PROMPT_COLOR = 0x5865f2;
+const SUCCESS_COLOR = 0x57f287;
+const ERROR_COLOR = 0xed4245;
 
 export class ToolResultCollector {
-  private idManager: ComponentIdManager;
+  private serializer: ComponentSerializer;
 
-  constructor(private channel: TextBasedChannel, private userId: string, sessionId: string) {
-    this.idManager = new ComponentIdManager(sessionId, 'tool');
+  constructor(private channel: SendableChannels, private userId: string, sessionId: string) {
+    const idManager = new ComponentIdManager(sessionId, 'tool');
+    this.serializer = new ComponentSerializer((id) => idManager.namespace(id));
   }
 
   async collectConfirm(prompt: string, yesLabel = 'Yes', noLabel = 'No'): Promise<boolean> {
-    const yesId = this.idManager.namespace('confirm-yes');
-    const noId = this.idManager.namespace('confirm-no');
+    const embed = new EmbedBuilder().setDescription(prompt).setColor(PROMPT_COLOR);
 
-    const embed = new EmbedBuilder().setDescription(prompt).setColor(0x5865f2);
+    const yesBtn = button({ label: yesLabel, style: ButtonStyle.Success, id: 'confirm-yes' });
+    const noBtn = button({ label: noLabel, style: ButtonStyle.Danger, id: 'confirm-no' });
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(yesId).setLabel(yesLabel).setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(noId).setLabel(noLabel).setStyle(ButtonStyle.Danger),
-    );
+    const yesId = this.serializer.resolveId('confirm-yes');
+    const noId = this.serializer.resolveId('confirm-no');
 
-    const message = await this.channel.send({ embeds: [embed], components: [row] });
+    const { interaction } = await this.sendAndCollect({
+      embeds: [embed],
+      rows: [actionRow([yesBtn, noBtn])],
+      filter: (i) => i.user.id === this.userId && [yesId, noId].includes(i.customId),
+      timeoutMessage: 'Timed out waiting for confirmation.',
+    });
 
-    try {
-      const interaction = await message.awaitMessageComponent({
-        filter: (i) => i.user.id === this.userId && [yesId, noId].includes(i.customId),
-        time: COLLECT_TIMEOUT,
-        componentType: ComponentType.Button,
-      });
-
-      const selected = interaction.customId === yesId;
-      await this.disableAndShow(interaction, selected ? yesLabel : noLabel);
-      return selected;
-    } catch {
-      await this.disableMessage(message);
-      throw new Error('Timed out waiting for confirmation.');
-    }
+    const selected = interaction.customId === yesId;
+    await this.disableAndShow(interaction, selected ? yesLabel : noLabel);
+    return selected;
   }
 
   async collectChoices(prompt: string, options: ChoiceOption[]): Promise<string> {
-    const embed = new EmbedBuilder().setDescription(prompt).setColor(0x5865f2);
+    const embed = new EmbedBuilder().setDescription(prompt).setColor(PROMPT_COLOR);
 
-    const buttons = options.map((opt, i) => {
-      const id = this.idManager.namespace(`choice-${i}`);
-      const btn = new ButtonBuilder()
-        .setCustomId(id)
-        .setLabel(opt.label)
-        .setStyle(ButtonStyle.Primary);
-      return btn;
+    const buttons: ButtonConfig[] = options.map((opt, i) =>
+      button({ label: opt.label, style: ButtonStyle.Primary, id: `choice-${i}` }),
+    );
+
+    const rows = buttonsToActionRows(buttons);
+
+    // Validate action row count using FlowCord's validator
+    const validation = validateEmbeds(rows.length, 'choices');
+    if (!validation.valid) {
+      throw new Error(validation.errors.join('; '));
+    }
+
+    const validIds = options.map((_, i) => this.serializer.resolveId(`choice-${i}`));
+
+    const { interaction } = await this.sendAndCollect({
+      embeds: [embed],
+      rows,
+      filter: (i) => i.user.id === this.userId && validIds.includes(i.customId),
+      timeoutMessage: 'Timed out waiting for choice.',
     });
 
-    // Discord allows max 5 buttons per row
-    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons.slice(i, i + 5)));
-    }
-
-    const message = await this.channel.send({ embeds: [embed], components: rows });
-
-    const validIds = options.map((_, i) => this.idManager.namespace(`choice-${i}`));
-
-    try {
-      const interaction = await message.awaitMessageComponent({
-        filter: (i) => i.user.id === this.userId && validIds.includes(i.customId),
-        time: COLLECT_TIMEOUT,
-        componentType: ComponentType.Button,
-      });
-
-      const idx = validIds.indexOf(interaction.customId);
-      const selected = options[idx];
-      await this.disableAndShow(interaction, selected.label);
-      return selected.value;
-    } catch {
-      await this.disableMessage(message);
-      throw new Error('Timed out waiting for choice.');
-    }
+    const idx = validIds.indexOf(interaction.customId);
+    const selected = options[idx];
+    await this.disableAndShow(interaction, selected.label);
+    return selected.value;
   }
 
   async collectSelect(
@@ -118,58 +121,55 @@ export class ToolResultCollector {
     minValues = 1,
     maxValues = 1,
   ): Promise<string[]> {
-    const selectId = this.idManager.namespace('select');
+    const embed = new EmbedBuilder().setDescription(prompt).setColor(PROMPT_COLOR);
 
-    const embed = new EmbedBuilder().setDescription(prompt).setColor(0x5865f2);
-
-    const select = new StringSelectMenuBuilder()
-      .setCustomId(selectId)
+    const selectBuilder = new StringSelectMenuBuilder()
       .setPlaceholder(placeholder ?? 'Select an option...')
       .setMinValues(minValues)
       .setMaxValues(maxValues)
       .addOptions(options.map((o) => ({ label: o.label, value: o.value })));
 
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-    const message = await this.channel.send({ embeds: [embed], components: [row] });
+    // Route through FlowCord's select config + ComponentSerializer
+    const selectConfig = select({ builder: selectBuilder, id: 'select' });
+    const selectId = this.serializer.resolveId('select');
 
-    try {
-      const interaction = await message.awaitMessageComponent({
-        filter: (i) => i.user.id === this.userId && i.customId === selectId,
-        time: COLLECT_TIMEOUT,
-        componentType: ComponentType.StringSelect,
-      });
+    const { interaction } = await this.sendAndCollect({
+      embeds: [embed],
+      rows: [actionRow([selectConfig])],
+      filter: (i) => i.user.id === this.userId && i.customId === selectId,
+      timeoutMessage: 'Timed out waiting for selection.',
+    });
 
-      const values = interaction.values;
-      const labels = values.map((v) => options.find((o) => o.value === v)?.label ?? v);
-      await this.disableAndShow(interaction, labels.join(', '));
-      return values;
-    } catch {
-      await this.disableMessage(message);
-      throw new Error('Timed out waiting for selection.');
-    }
+    const values = (interaction as StringSelectMenuInteraction).values;
+    const labels = values.map((v: string) => options.find((o) => o.value === v)?.label ?? v);
+    await this.disableAndShow(interaction, labels.join(', '));
+    return values;
   }
 
   async collectForm(
     title: string,
     fields: FormField[],
   ): Promise<Record<string, string>> {
-    const triggerId = this.idManager.namespace('form-trigger');
-    const modalId = this.idManager.namespace('form-modal');
+    const embed = new EmbedBuilder()
+      .setDescription(`**${title}**\nClick the button below to fill out the form.`)
+      .setColor(PROMPT_COLOR);
 
-    const embed = new EmbedBuilder().setDescription(`**${title}**\nClick the button below to fill out the form.`).setColor(0x5865f2);
+    const triggerBtn = button({
+      label: 'Fill out form',
+      style: ButtonStyle.Primary,
+      id: 'form-trigger',
+    });
 
-    const triggerButton = new ButtonBuilder()
-      .setCustomId(triggerId)
-      .setLabel('Fill out form')
-      .setStyle(ButtonStyle.Primary);
+    const triggerId = this.serializer.resolveId('form-trigger');
+    const modalId = this.serializer.resolveId('form-modal');
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(triggerButton);
-    const message = await this.channel.send({ embeds: [embed], components: [row] });
+    // Form uses a two-step flow (button → modal) so it can't use sendAndCollect directly
+    const discordRow = this.serializer.buildActionRow(actionRow([triggerBtn]));
+    const message = await this.channel.send({ embeds: [embed], components: [discordRow] });
 
     try {
-      // Wait for user to click the trigger button
       const buttonInteraction = await message.awaitMessageComponent({
-        filter: (i) => i.user.id === this.userId && i.customId === triggerId,
+        filter: (i: ButtonInteraction) => i.user.id === this.userId && i.customId === triggerId,
         time: COLLECT_TIMEOUT,
         componentType: ComponentType.Button,
       });
@@ -191,9 +191,8 @@ export class ToolResultCollector {
 
       await buttonInteraction.showModal(modal);
 
-      // Wait for modal submission
       const modalInteraction = await buttonInteraction.awaitModalSubmit({
-        filter: (i) => i.customId === modalId && i.user.id === this.userId,
+        filter: (i: ModalSubmitInteraction) => i.customId === modalId && i.user.id === this.userId,
         time: COLLECT_TIMEOUT,
       });
 
@@ -204,10 +203,9 @@ export class ToolResultCollector {
         result[field.id] = modalInteraction.fields.getTextInputValue(field.id);
       }
 
-      // Update the original message to show completion
       const completionEmbed = new EmbedBuilder()
         .setDescription(`**${title}** — submitted`)
-        .setColor(0x57f287);
+        .setColor(SUCCESS_COLOR);
       await message.edit({ embeds: [completionEmbed], components: [] });
 
       return result;
@@ -217,15 +215,42 @@ export class ToolResultCollector {
     }
   }
 
+  /**
+   * Shared helper: serialize FlowCord rows → send to channel → await one interaction.
+   * Handles timeout with consistent disable + error behavior.
+   * Mirrors the collectInteraction() helper proposed for FlowCord (see flowcord-gaps.md, Suggestion B).
+   */
+  private async sendAndCollect(opts: {
+    embeds: EmbedBuilder[];
+    rows: ActionRowConfig[];
+    filter: (i: MessageComponentInteraction) => boolean;
+    timeoutMessage: string;
+  }): Promise<CollectResult> {
+    const discordRows = opts.rows.map((r) => this.serializer.buildActionRow(r));
+    const message = await this.channel.send({ embeds: opts.embeds, components: discordRows });
+
+    try {
+      const interaction = await message.awaitMessageComponent({
+        filter: opts.filter,
+        time: COLLECT_TIMEOUT,
+      });
+
+      return { interaction, message };
+    } catch {
+      await this.disableMessage(message);
+      throw new Error(opts.timeoutMessage);
+    }
+  }
+
   private async disableAndShow(interaction: MessageComponentInteraction, selectedLabel: string): Promise<void> {
     const embed = new EmbedBuilder()
       .setDescription(`Selected: **${selectedLabel}**`)
-      .setColor(0x57f287);
+      .setColor(SUCCESS_COLOR);
     await interaction.update({ embeds: [embed], components: [] });
   }
 
-  private async disableMessage(message: { edit: (opts: object) => Promise<unknown> }): Promise<void> {
-    const embed = new EmbedBuilder().setDescription('*Timed out*').setColor(0xed4245);
+  private async disableMessage(message: Message): Promise<void> {
+    const embed = new EmbedBuilder().setDescription('*Timed out*').setColor(ERROR_COLOR);
     try {
       await message.edit({ embeds: [embed], components: [] });
     } catch {

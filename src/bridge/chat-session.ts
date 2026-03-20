@@ -1,7 +1,7 @@
+import { randomUUID } from 'crypto';
 import {
-  type TextBasedChannel,
+  type SendableChannels,
   type Message,
-  createMessageComponentCollector,
 } from 'discord.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { Conversation } from '../claude/conversation.js';
@@ -23,12 +23,12 @@ export class ChatSession {
   constructor(
     private claudeClient: ClaudeClient,
     private scenario: ScenarioConfig,
-    private channel: TextBasedChannel,
+    private channel: SendableChannels,
     private userId: string,
     private onEnd: () => void,
   ) {
     this.conversation = new Conversation();
-    const sessionId = Math.random().toString(36).slice(2, 14);
+    const sessionId = randomUUID().slice(0, 12);
     const collector = new ToolResultCollector(channel, userId, sessionId);
     this.toolExecutor = new ToolExecutor(collector);
   }

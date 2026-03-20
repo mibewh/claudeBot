@@ -64,7 +64,7 @@ export async function handleChatCommand(
   await interaction.reply(`Starting **${scenario.name}** session...`);
 
   const channel = interaction.channel;
-  if (!channel) return;
+  if (!channel?.isSendable()) return;
 
   const session = new ChatSession(claudeClient, scenario, channel, interaction.user.id, () => {
     activeSessions.delete(key);
