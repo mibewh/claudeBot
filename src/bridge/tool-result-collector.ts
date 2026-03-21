@@ -54,13 +54,38 @@ const COLLECT_TIMEOUT = 120_000; // 2 minutes
 const PROMPT_COLOR = 0x5865f2;
 const SUCCESS_COLOR = 0x57f287;
 const ERROR_COLOR = 0xed4245;
+const CANCELLED_COLOR = 0xfee75c;
+
+export class CollectionCancelledError extends Error {
+  constructor() {
+    super('Interaction cancelled — user sent a new message.');
+    this.name = 'CollectionCancelledError';
+  }
+}
 
 export class ToolResultCollector {
   private serializer: ComponentSerializer;
+  private abortController: AbortController | null = null;
+  private pendingMessage: Message | null = null;
 
   constructor(private channel: SendableChannels, private userId: string, sessionId: string) {
     const idManager = new ComponentIdManager(sessionId, 'tool');
     this.serializer = new ComponentSerializer((id) => idManager.namespace(id));
+  }
+
+  /**
+   * Cancel any pending component interaction and clean up the Discord message.
+   * Called by ChatSession when the user sends a new message mid-interaction.
+   */
+  async cancelPending(): Promise<void> {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+    if (this.pendingMessage) {
+      await this.dismissMessage(this.pendingMessage);
+      this.pendingMessage = null;
+    }
   }
 
   async collectConfirm(prompt: string, yesLabel = 'Yes', noLabel = 'No'): Promise<boolean> {
@@ -167,12 +192,17 @@ export class ToolResultCollector {
     const discordRow = this.serializer.buildActionRow(actionRow([triggerBtn]));
     const message = await this.channel.send({ embeds: [embed], components: [discordRow] });
 
+    this.abortController = new AbortController();
+    this.pendingMessage = message;
+
     try {
-      const buttonInteraction = await message.awaitMessageComponent({
-        filter: (i: ButtonInteraction) => i.user.id === this.userId && i.customId === triggerId,
-        time: COLLECT_TIMEOUT,
-        componentType: ComponentType.Button,
-      });
+      const buttonInteraction = await this.raceAbort(
+        message.awaitMessageComponent({
+          filter: (i: ButtonInteraction) => i.user.id === this.userId && i.customId === triggerId,
+          time: COLLECT_TIMEOUT,
+          componentType: ComponentType.Button,
+        }),
+      );
 
       // Build and show modal
       const modal = new ModalBuilder().setCustomId(modalId).setTitle(title);
@@ -191,11 +221,14 @@ export class ToolResultCollector {
 
       await buttonInteraction.showModal(modal);
 
-      const modalInteraction = await buttonInteraction.awaitModalSubmit({
-        filter: (i: ModalSubmitInteraction) => i.customId === modalId && i.user.id === this.userId,
-        time: COLLECT_TIMEOUT,
-      });
+      const modalInteraction = await this.raceAbort(
+        buttonInteraction.awaitModalSubmit({
+          filter: (i: ModalSubmitInteraction) => i.customId === modalId && i.user.id === this.userId,
+          time: COLLECT_TIMEOUT,
+        }),
+      );
 
+      this.pendingMessage = null;
       await modalInteraction.deferUpdate();
 
       const result: Record<string, string> = {};
@@ -209,7 +242,9 @@ export class ToolResultCollector {
       await message.edit({ embeds: [completionEmbed], components: [] });
 
       return result;
-    } catch {
+    } catch (err) {
+      this.pendingMessage = null;
+      if (err instanceof CollectionCancelledError) throw err;
       await this.disableMessage(message);
       throw new Error('Timed out waiting for form submission.');
     }
@@ -217,7 +252,7 @@ export class ToolResultCollector {
 
   /**
    * Shared helper: serialize FlowCord rows → send to channel → await one interaction.
-   * Handles timeout with consistent disable + error behavior.
+   * Handles timeout and cancellation with consistent cleanup behavior.
    * Mirrors the collectInteraction() helper proposed for FlowCord (see flowcord-gaps.md, Suggestion B).
    */
   private async sendAndCollect(opts: {
@@ -229,14 +264,19 @@ export class ToolResultCollector {
     const discordRows = opts.rows.map((r) => this.serializer.buildActionRow(r));
     const message = await this.channel.send({ embeds: opts.embeds, components: discordRows });
 
-    try {
-      const interaction = await message.awaitMessageComponent({
-        filter: opts.filter,
-        time: COLLECT_TIMEOUT,
-      });
+    this.abortController = new AbortController();
+    this.pendingMessage = message;
 
+    try {
+      const interaction = await this.raceAbort(
+        message.awaitMessageComponent({ filter: opts.filter, time: COLLECT_TIMEOUT }),
+      );
+
+      this.pendingMessage = null;
       return { interaction, message };
-    } catch {
+    } catch (err) {
+      this.pendingMessage = null;
+      if (err instanceof CollectionCancelledError) throw err;
       await this.disableMessage(message);
       throw new Error(opts.timeoutMessage);
     }
@@ -256,5 +296,34 @@ export class ToolResultCollector {
     } catch {
       // Message may have been deleted
     }
+  }
+
+  private async dismissMessage(message: Message): Promise<void> {
+    const embed = new EmbedBuilder().setDescription('*Cancelled*').setColor(CANCELLED_COLOR);
+    try {
+      await message.edit({ embeds: [embed], components: [] });
+    } catch {
+      // Message may have been deleted
+    }
+  }
+
+  /**
+   * Race a promise against the abort signal. Rejects with CollectionCancelledError
+   * if cancelPending() is called before the promise resolves.
+   */
+  private raceAbort<T>(promise: Promise<T>): Promise<T> {
+    const { abortController } = this;
+    if (!abortController) return promise;
+
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        if (abortController.signal.aborted) {
+          reject(new CollectionCancelledError());
+          return;
+        }
+        abortController.signal.addEventListener('abort', () => reject(new CollectionCancelledError()), { once: true });
+      }),
+    ]);
   }
 }
